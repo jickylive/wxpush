@@ -20,6 +20,12 @@
 *点击上方图片或链接，即可跳转到 YouTube 观看视频教程。*
 
 
+## 📚 文档中心
+
+查看完整的项目文档，包括详细的部署指南、测试说明、安全审计报告等：
+
+- **[📖 文档中心](docs/README.md)** - 完整的项目文档导航
+
 ## 🚀 部署指南
 
 我们提供两种简单的部署方式，您可以根据自己的需求选择其中一种。
@@ -191,3 +197,10 @@ curl -X POST \
 ## 📜 许可证
 
 本项目采用 [MIT License](LICENSE) 开源许可证。
+
+## 🔗 相关链接
+
+- **[📖 完整文档](docs/README.md)** - 查看所有详细文档
+- **[🚀 部署指南](docs/guides/DEPLOYMENT_GUIDE.md)** - 详细的部署步骤
+- **[🔒 安全报告](docs/security/SECURITY_AUDIT_REPORT.md)** - 安全审计结果
+- **[🧪 测试说明](docs/guides/TESTING.md)** - 测试框架使用指南
