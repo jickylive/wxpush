@@ -1,6 +1,7 @@
 name = "wxpush"
 main = "src/index-refactored.js"
 compatibility_date = "2023-11-21"
+compatibility_flags = ["nodejs_compat"]
 
 # 环境变量（非敏感配置）
 [vars]

@@ -127,32 +127,12 @@ export function generateSecureToken(length = 32) {
   const charset = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789'
   let result = ''
 
-  // 检测环境并使用相应的 crypto API
-  let randomValues
-  if (typeof crypto !== 'undefined' && crypto.getRandomValues) {
-    // 浏览器环境
-    const array = new Uint32Array(length)
-    crypto.getRandomValues(array)
-    randomValues = array
-  } else if (typeof require !== 'undefined') {
-    // Node.js 环境
-    const nodeCrypto = require('crypto')
-    randomValues = new Uint32Array(length)
-    const buffer = Buffer.alloc(length * 4)
-    nodeCrypto.randomFillSync(buffer)
-    for (let i = 0; i < length; i++) {
-      randomValues[i] = buffer.readUInt32LE(i * 4)
-    }
-  } else {
-    // 降级方案：使用 Math.random（不推荐用于生产环境）
-    randomValues = new Uint32Array(length)
-    for (let i = 0; i < length; i++) {
-      randomValues[i] = Math.floor(Math.random() * 0xFFFFFFFF)
-    }
-  }
+  // 使用 Web Crypto API（Cloudflare Workers 支持）
+  const array = new Uint32Array(length)
+  crypto.getRandomValues(array)
 
   for (let i = 0; i < length; i++) {
-    result += charset[randomValues[i] % charset.length]
+    result += charset[array[i] % charset.length]
   }
 
   return result
