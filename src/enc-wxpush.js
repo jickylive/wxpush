@@ -1,3 +1,5 @@
+import * as openpgp from 'https://cdn.jsdelivr.net/npm/openpgp@5.11.2/+esm'
+
 // NEW: Helper function to extract parameters from any request type
 async function getParams(request) {
   const { searchParams } = new URL(request.url)
@@ -60,6 +62,40 @@ async function getParams(request) {
 
   // Merge params, giving body parameters precedence over URL parameters
   return { ...urlParams, ...bodyParams }
+}
+
+// NEW: Helper function to decrypt text if it looks like a PGP message
+async function tryDecrypt(text, env) {
+  if (!text || typeof text !== 'string') return text
+  // Simple check for PGP Armor header
+  if (text.includes('-----BEGIN PGP MESSAGE-----') && env.GPG_PRIVATE_KEY) {
+    try {
+      // Parse the private key
+      // NOTE: If your key has a passphrase, you need to add env.GPG_PASSPHRASE
+      const privateKey = await openpgp.readPrivateKey({
+        armoredKey: env.GPG_PRIVATE_KEY,
+      })
+
+      const decryptionOptions = {
+        message: await openpgp.readMessage({ armoredMessage: text }),
+        decryptionKeys: privateKey,
+      }
+
+      // If you set a passphrase in env, use it (optional)
+      // Note: openpgp.js handles encrypted keys differently, but for simplicity
+      // if the key is encrypted, readPrivateKey usually requires the passphrase option inside it,
+      // or we might need to decrypt the key first. Assuming unencrypted key for standard server usage
+      // or handling it if provided.
+      // simpler implementation for standard non-passphrase or pre-decrypted keys:
+
+      const { data: decrypted } = await openpgp.decrypt(decryptionOptions)
+      return decrypted
+    } catch (error) {
+      console.error('GPG Decryption failed:', error)
+      return `[GPG Decryption Failed: ${error.message}] \nRaw: ${text}`
+    }
+  }
+  return text
 }
 
 export default {
@@ -317,9 +353,12 @@ export default {
       // MODIFIED: Use the new helper function to get all parameters
       const params = await getParams(request)
 
-      // MODIFIED: Read parameters from the unified 'params' object
-      const content = params.content
-      const title = params.title
+      // --- NEW GPG DECRYPTION LOGIC START ---
+      // Try to decrypt content and title if they are GPG encrypted
+      const content = await tryDecrypt(params.content, env)
+      const title = await tryDecrypt(params.title, env)
+      // --- NEW GPG DECRYPTION LOGIC END ---
+
       // token can come from body/url params or from Authorization header
       let requestToken = params.token
       if (!requestToken) {

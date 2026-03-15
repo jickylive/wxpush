@@ -1,89 +1,203 @@
-// NEW: Helper function to extract parameters from any request type
-async function getParams(request) {
-  const { searchParams } = new URL(request.url)
-  const urlParams = Object.fromEntries(searchParams.entries())
+/**
+ * WXPush - 微信消息推送服务（重构版本）
+ * 使用共享模块库，代码更简洁、可维护
+ */
 
-  let bodyParams = {}
-  // Only try to parse a body if it's a POST/PUT/PATCH request
-  if (request.method === 'POST' || request.method === 'PUT' || request.method === 'PATCH') {
-    const contentType = (request.headers.get('content-type') || '').toLowerCase()
-    try {
-      if (contentType.includes('application/json')) {
-        const jsonBody = await request.json()
-        // jsonBody can be a string, an object, or other types
-        if (typeof jsonBody === 'string') {
-          // treat raw string as content
-          bodyParams = { content: jsonBody }
-        } else if (jsonBody && typeof jsonBody === 'object') {
-          // support nested containers like { params: {...} } or { data: {...} }
-          if (jsonBody.params && typeof jsonBody.params === 'object') {
-            bodyParams = jsonBody.params
-          } else if (jsonBody.data && typeof jsonBody.data === 'object') {
-            bodyParams = jsonBody.data
-          } else {
-            bodyParams = jsonBody
-          }
-        }
-      } else if (
-        contentType.includes('application/x-www-form-urlencoded') ||
-        contentType.includes('multipart/form-data')
-      ) {
-        const formData = await request.formData()
-        bodyParams = Object.fromEntries(formData.entries())
-      } else {
-        // Fallback: try to read raw text and parse as JSON, otherwise treat as raw content
-        const text = await request.text()
-        if (text) {
-          try {
-            const parsed = JSON.parse(text)
-            if (parsed && typeof parsed === 'object') {
-              if (parsed.params && typeof parsed.params === 'object') {
-                bodyParams = parsed.params
-              } else if (parsed.data && typeof parsed.data === 'object') {
-                bodyParams = parsed.data
-              } else {
-                bodyParams = parsed
-              }
-            } else {
-              bodyParams = { content: text }
-            }
-          } catch (e) {
-            bodyParams = { content: text }
-          }
-        }
-      }
-    } catch (error) {
-      console.error('Failed to parse request body:', error)
-      // Ignore body parsing errors and proceed with URL params
-    }
-  }
+import { getParams, extractAuthToken, getClientIP } from './lib/request.js'
 
-  // Merge params, giving body parameters precedence over URL parameters
-  return { ...urlParams, ...bodyParams }
-}
+import { getStableToken, sendMessagesWithConcurrency } from './lib/wechat.js'
+
+import {
+  successResponse,
+  errorResponse,
+  missingParamsResponse,
+  unauthorizedResponse,
+  internalErrorResponse,
+  healthCheckResponse,
+} from './lib/response.js'
+
+import { checkRateLimit } from './lib/rateLimit.js'
+import { escapeHtml } from './lib/security.js'
 
 export default {
   async fetch(request, env, _ctx) {
     const url = new URL(request.url)
-    // If path is a single segment like '/<token>', serve an interactive test page
-    // but ignore reserved paths like '/wxsend' and '/index.html'
+
+    // 健康检查端点
+    if (url.pathname === '/health') {
+      return healthCheckResponse('WXPush', '1.0.0')
+    }
+
+    // 测试页面路由
     const singleSeg = url.pathname.match(/^\/([^/]+)\/?$/)
     if (singleSeg && singleSeg[1] && singleSeg[1] !== 'wxsend' && singleSeg[1] !== 'index.html') {
       const rawTokenFromPath = singleSeg[1]
 
-      // 1. Authenticate the token first
+      // 认证令牌
       if (rawTokenFromPath !== env.API_TOKEN) {
-        return new Response('Invalid token', { status: 403 })
+        return unauthorizedResponse()
       }
 
-      // 2. Sanitize the token for safe embedding into HTML value attributes
-      const sanitizedToken = rawTokenFromPath
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;')
-        .replace(/"/g, '&quot;')
+      // 转义令牌以安全嵌入 HTML
+      const sanitizedToken = escapeHtml(rawTokenFromPath)
 
-      const html = `<!doctype html>
+      return new Response(getTestPageHtml(sanitizedToken), {
+        headers: { 'Content-Type': 'text/html; charset=utf-8' },
+      })
+    }
+
+    // 消息发送路由
+    if (url.pathname === '/wxsend') {
+      return await handleSendMessage(request, env)
+    }
+
+    // 首页路由
+    if (request.method === 'GET' && (url.pathname === '/' || url.pathname === '/index.html')) {
+      return new Response(getHomePageHtml(), {
+        headers: { 'Content-Type': 'text/html; charset=utf-8' },
+      })
+    }
+
+    // 404
+    return new Response('Not Found', { status: 404 })
+  },
+}
+
+/**
+ * 处理消息发送请求
+ */
+async function handleSendMessage(request, env) {
+  try {
+    // 解析参数
+    const params = await getParams(request)
+
+    // 提取认证令牌
+    const requestToken = extractAuthToken(request, params)
+
+    // 验证必需参数
+    const content = params.content
+    const title = params.title
+
+    if (!content || !title || !requestToken) {
+      return missingParamsResponse({
+        content: !content ? 'content is required' : null,
+        title: !title ? 'title is required' : null,
+        token: !requestToken ? 'token is required' : null,
+      })
+    }
+
+    // 验证令牌
+    if (requestToken !== env.API_TOKEN) {
+      return unauthorizedResponse()
+    }
+
+    // 速率限制检查（可选）
+    if (env.RATE_LIMIT) {
+      const clientIP = getClientIP(request)
+      const rateLimitResult = await checkRateLimit(`wxpush:${clientIP}`, env, 100, 60)
+
+      if (!rateLimitResult.allowed) {
+        return new Response(
+          JSON.stringify({
+            success: false,
+            error: 'Rate limit exceeded',
+            message: 'Too many requests. Please try again later.',
+            reset: new Date(rateLimitResult.reset).toISOString(),
+          }),
+          {
+            status: 429,
+            headers: {
+              'Content-Type': 'application/json',
+              'Retry-After': Math.ceil((rateLimitResult.reset - Date.now()) / 1000).toString(),
+            },
+          }
+        )
+      }
+    }
+
+    // 获取配置
+    const appid = params.appid || env.WX_APPID
+    const secret = params.secret || env.WX_SECRET
+    const useridStr = params.userid || env.WX_USERID
+    const template_id = params.template_id || env.WX_TEMPLATE_ID
+    const base_url = params.base_url || env.WX_BASE_URL
+
+    // 验证必需的环境变量
+    if (!appid || !secret || !useridStr || !template_id) {
+      return errorResponse(
+        'Missing required environment variables',
+        'Please configure all required environment variables',
+        {
+          appid: !appid ? 'WX_APPID is required' : null,
+          secret: !secret ? 'WX_SECRET is required' : null,
+          useridStr: !useridStr ? 'WX_USERID is required' : null,
+          template_id: !template_id ? 'WX_TEMPLATE_ID is required' : null,
+        },
+        500
+      )
+    }
+
+    // 解析用户列表
+    const user_list = useridStr
+      .split('|')
+      .map((uid) => uid.trim())
+      .filter(Boolean)
+
+    // 获取访问令牌（支持缓存）
+    const accessToken = await getStableToken(appid, secret, env)
+
+    if (!accessToken) {
+      return errorResponse(
+        'Authentication failed',
+        'Failed to get access token from WeChat API',
+        {},
+        500
+      )
+    }
+
+    // 批量发送消息（带并发控制）
+    const results = await sendMessagesWithConcurrency(
+      accessToken,
+      user_list,
+      template_id,
+      base_url,
+      title,
+      content,
+      5 // 并发数
+    )
+
+    // 统计结果
+    const successfulMessages = results.filter((r) => r.errmsg === 'ok')
+
+    if (successfulMessages.length > 0) {
+      return successResponse(`Successfully sent messages to ${successfulMessages.length} user(s)`, {
+        sentCount: successfulMessages.length,
+        totalCount: user_list.length,
+        failedCount: user_list.length - successfulMessages.length,
+      })
+    } else {
+      const firstError = results.length > 0 ? results[0].errmsg : 'Unknown error'
+      return errorResponse(
+        'Failed to send messages',
+        `WeChat API returned error: ${firstError}`,
+        {
+          attemptedUsers: user_list.length,
+          errorDetails: results,
+        },
+        500
+      )
+    }
+  } catch (error) {
+    console.error('Error:', error)
+    return internalErrorResponse(error)
+  }
+}
+
+/**
+ * 生成测试页面 HTML
+ */
+function getTestPageHtml(token) {
+  return `<!doctype html>
 <html lang="zh-CN">
   <head>
     <meta charset="utf-8" />
@@ -198,7 +312,7 @@ export default {
   <body>
     <div class="container">
       <h1>WXPush 测试页面</h1>
-      <p class="hint">当前 token (来自路径)：<strong>${sanitizedToken}</strong></p>
+      <p class="hint">当前 token (来自路径)：<strong>${token}</strong></p>
 
       <form id="testForm" method="POST" action="/wxsend">
 
@@ -223,7 +337,7 @@ export default {
         <label for="base_url">跳转链接 base_url (可选)</label>
         <input id="base_url" name="base_url" type="text" />
 
-        <input type="hidden" name="token" id="hiddenToken" value="${sanitizedToken}" />
+        <input type="hidden" name="token" id="hiddenToken" value="${token}" />
 
         <div style="display:flex;gap:12px;align-items:center">
           <button id="sendBtn" type="submit">发送测试请求</button>
@@ -292,188 +406,13 @@ export default {
     </script>
   </body>
 </html>`
+}
 
-      return new Response(html, { headers: { 'Content-Type': 'text/html; charset=utf-8' } })
-    }
-
-    // Health check endpoint
-    if (url.pathname === '/health') {
-      return new Response(
-        JSON.stringify({
-          status: 'healthy',
-          service: 'WXPush',
-          version: '1.0.0',
-          timestamp: new Date().toISOString(),
-          uptime: process.uptime ? process.uptime() : 'N/A',
-        }),
-        {
-          headers: { 'Content-Type': 'application/json' },
-        }
-      )
-    }
-
-    // Route: only handle message sending on '/wxsend'
-    if (url.pathname === '/wxsend') {
-      // MODIFIED: Use the new helper function to get all parameters
-      const params = await getParams(request)
-
-      // MODIFIED: Read parameters from the unified 'params' object
-      const content = params.content
-      const title = params.title
-      // token can come from body/url params or from Authorization header
-      let requestToken = params.token
-      if (!requestToken) {
-        const authHeader =
-          request.headers.get('Authorization') || request.headers.get('authorization')
-        if (authHeader) {
-          // support formats: 'Bearer <token>' or raw token
-          const parts = authHeader.split(' ')
-          requestToken = parts.length === 2 && /^Bearer$/i.test(parts[0]) ? parts[1] : authHeader
-        }
-      }
-
-      if (!content || !title || !requestToken) {
-        return new Response(
-          JSON.stringify({
-            success: false,
-            error: 'Missing required parameters',
-            details: {
-              content: !content ? 'content is required' : null,
-              title: !title ? 'title is required' : null,
-              token: !requestToken ? 'token is required' : null,
-            },
-            documentation: 'https://github.com/frankiejun/wxpush#api-usage',
-          }),
-          {
-            status: 400,
-            headers: { 'Content-Type': 'application/json' },
-          }
-        )
-      }
-
-      if (requestToken !== env.API_TOKEN) {
-        return new Response(
-          JSON.stringify({
-            success: false,
-            error: 'Invalid token',
-            message: 'The provided token does not match the required API_TOKEN',
-          }),
-          {
-            status: 403,
-            headers: { 'Content-Type': 'application/json' },
-          }
-        )
-      }
-
-      const appid = params.appid || env.WX_APPID
-      const secret = params.secret || env.WX_SECRET
-      const useridStr = params.userid || env.WX_USERID
-      const template_id = params.template_id || env.WX_TEMPLATE_ID
-      const base_url = params.base_url || env.WX_BASE_URL
-
-      if (!appid || !secret || !useridStr || !template_id) {
-        return new Response(
-          JSON.stringify({
-            success: false,
-            error: 'Missing required environment variables',
-            details: {
-              appid: !appid ? 'WX_APPID is required' : null,
-              secret: !secret ? 'WX_SECRET is required' : null,
-              useridStr: !useridStr ? 'WX_USERID is required' : null,
-              template_id: !template_id ? 'WX_TEMPLATE_ID is required' : null,
-            },
-          }),
-          {
-            status: 500,
-            headers: { 'Content-Type': 'application/json' },
-          }
-        )
-      }
-
-      const user_list = useridStr
-        .split('|')
-        .map((uid) => uid.trim())
-        .filter(Boolean)
-
-      try {
-        const accessToken = await getStableToken(appid, secret)
-        if (!accessToken) {
-          return new Response(
-            JSON.stringify({
-              success: false,
-              error: 'Authentication failed',
-              message: 'Failed to get access token from WeChat API',
-            }),
-            {
-              status: 500,
-              headers: { 'Content-Type': 'application/json' },
-            }
-          )
-        }
-
-        const results = await Promise.all(
-          user_list.map((userid) =>
-            sendMessage(accessToken, userid, template_id, base_url, title, content)
-          )
-        )
-
-        const successfulMessages = results.filter((r) => r.errmsg === 'ok')
-
-        if (successfulMessages.length > 0) {
-          return new Response(
-            JSON.stringify({
-              success: true,
-              message: `Successfully sent messages to ${successfulMessages.length} user(s)`,
-              data: {
-                sentCount: successfulMessages.length,
-                totalCount: user_list.length,
-                timestamp: new Date().toISOString(),
-              },
-            }),
-            {
-              status: 200,
-              headers: { 'Content-Type': 'application/json' },
-            }
-          )
-        } else {
-          const firstError = results.length > 0 ? results[0].errmsg : 'Unknown error'
-          return new Response(
-            JSON.stringify({
-              success: false,
-              error: 'Failed to send messages',
-              message: `WeChat API returned error: ${firstError}`,
-              details: {
-                attemptedUsers: user_list.length,
-                errorDetails: results,
-              },
-            }),
-            {
-              status: 500,
-              headers: { 'Content-Type': 'application/json' },
-            }
-          )
-        }
-      } catch (error) {
-        console.error('Error:', error)
-        return new Response(
-          JSON.stringify({
-            success: false,
-            error: 'Internal server error',
-            message: error.message,
-            timestamp: new Date().toISOString(),
-          }),
-          {
-            status: 500,
-            headers: { 'Content-Type': 'application/json' },
-          }
-        )
-      }
-    }
-
-    // If not /wxsend, handle homepage or other paths
-    // If request is a GET to root, serve a simple HTML homepage describing the service
-    if (request.method === 'GET' && (url.pathname === '/' || url.pathname === '/index.html')) {
-      const html = `<!doctype html>
+/**
+ * 生成首页 HTML
+ */
+function getHomePageHtml() {
+  return `<!doctype html>
 <html lang="zh-CN">
   <head>
     <meta charset="utf-8" />
@@ -584,67 +523,4 @@ export default {
     </div>
   </body>
 </html>`
-
-      return new Response(html, { headers: { 'Content-Type': 'text/html; charset=utf-8' } })
-    }
-
-    // For any other path/method, return 404
-    return new Response('Not Found', { status: 404 })
-  },
-}
-
-async function getStableToken(appid, secret) {
-  const tokenUrl = 'https://api.weixin.qq.com/cgi-bin/stable_token'
-  const payload = {
-    grant_type: 'client_credential',
-    appid: appid,
-    secret: secret,
-    force_refresh: false,
-  }
-  const response = await fetch(tokenUrl, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json;charset=utf-8' },
-    body: JSON.stringify(payload),
-  })
-  const data = await response.json()
-  return data.access_token
-}
-
-async function sendMessage(accessToken, userid, template_id, base_url, title, content) {
-  const sendUrl = `https://api.weixin.qq.com/cgi-bin/message/template/send?access_token=${accessToken}`
-
-  // 使用 Intl.DateTimeFormat 正确处理北京时间 (UTC+8)
-  const date = new Date()
-    .toLocaleString('zh-CN', {
-      timeZone: 'Asia/Shanghai',
-      year: 'numeric',
-      month: '2-digit',
-      day: '2-digit',
-      hour: '2-digit',
-      minute: '2-digit',
-      second: '2-digit',
-      hour12: false,
-    })
-    .replace(/\//g, '-')
-
-  const encoded_message = encodeURIComponent(content)
-  const encoded_date = encodeURIComponent(date)
-
-  const payload = {
-    touser: userid,
-    template_id: template_id,
-    url: `${base_url}?message=${encoded_message}&date=${encoded_date}&title=${encodeURIComponent(title)}`,
-    data: {
-      title: { value: title },
-      content: { value: content },
-    },
-  }
-
-  const response = await fetch(sendUrl, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json;charset=utf-8' },
-    body: JSON.stringify(payload),
-  })
-
-  return await response.json()
 }

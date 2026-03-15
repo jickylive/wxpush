@@ -1,3 +1,27 @@
 name = "wxpush"
-main = "src/index.js"
+main = "src/index-refactored.js"
 compatibility_date = "2023-11-21"
+
+# 环境变量（非敏感配置）
+[vars]
+ENVIRONMENT = "production"
+VERSION = "1.0.0"
+
+# KV 命名空间（可选，用于缓存 access_token 和速率限制）
+# 需要先在 Cloudflare 创建 KV 命名空间
+[[kv_namespaces]]
+binding = "WX_CACHE"
+id = "28ef1c3d200449ca96dce1f255ae158c"
+
+[[kv_namespaces]]
+binding = "RATE_LIMIT"
+id = "84f5fcb3664346a189e5950a554f04be"
+
+# 路由配置（可选，用于自定义域名）
+# routes = [
+#   { pattern = "wx.hxfund.cn/*", zone_name = "wx.hxfund.cn" }
+# ]
+
+# 限制配置
+[limits]
+cpu_ms = 50
