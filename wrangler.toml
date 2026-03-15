@@ -5,7 +5,7 @@ compatibility_date = "2023-11-21"
 # 环境变量（非敏感配置）
 [vars]
 ENVIRONMENT = "production"
-VERSION = "1.0.0"
+VERSION = "2.0.0"
 
 # KV 命名空间（可选，用于缓存 access_token 和速率限制）
 # 需要先在 Cloudflare 创建 KV 命名空间
