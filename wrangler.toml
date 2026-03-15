@@ -22,6 +22,5 @@ id = "84f5fcb3664346a189e5950a554f04be"
 #   { pattern = "wx.hxfund.cn/*", zone_name = "wx.hxfund.cn" }
 # ]
 
-# 限制配置
-[limits]
-cpu_ms = 50
+# 注意：CPU 限制配置已移除，因为 Cloudflare 免费计划不支持 CPU 限制
+# 如需使用 CPU 限制，请升级到付费计划
